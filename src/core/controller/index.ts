@@ -820,6 +820,18 @@ export class Controller {
 	}
 
 	private async detectVcs(dirPath: string): Promise<VcsType> {
+		// TODO: Future enhancement - support for multiple VCS systems
+		// This method currently only detects Git repositories, but we may need to extend
+		// it to support other version control systems like:
+		// - Mercurial (hg)
+		// - Subversion (svn)
+		// - Bazaar (bzr)
+		// - Perforce (p4)
+		// When adding support for additional VCS systems, consider:
+		// 1. Adding detection logic for each VCS type's metadata directories
+		// 2. Updating the VcsType enum to include new systems
+		// 3. Ensuring proper priority order when multiple VCS systems are present
+		// 4. Adding corresponding checkpoint and diff functionality for each VCS
 		try {
 			const isGit = await isGitRepository(dirPath)
 			return isGit ? VcsType.Git : VcsType.None
