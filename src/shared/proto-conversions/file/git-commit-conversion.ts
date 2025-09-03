@@ -22,6 +22,7 @@ export function convertProtoGitCommitsToGitCommits(protoCommits: ProtoGitCommit[
 		hash: protoCommit.hash,
 		shortHash: protoCommit.shortHash,
 		subject: protoCommit.subject,
+		message: protoCommit.subject, // Use subject as message for compatibility
 		author: protoCommit.author,
 		date: protoCommit.date,
 	}))

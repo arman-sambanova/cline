@@ -116,6 +116,13 @@ export class WorkspaceRootManager {
 	}
 
 	/**
+	 * Get the primary workspace root index
+	 */
+	getPrimaryIndex(): number {
+		return this.primaryIndex
+	}
+
+	/**
 	 * Set the primary workspace root by index
 	 */
 	setPrimaryIndex(index: number): void {

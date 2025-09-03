@@ -1,5 +1,7 @@
 import { Anthropic } from "@anthropic-ai/sdk"
 import { buildApiHandler } from "@core/api"
+import { VcsType, WorkspaceRoot } from "@core/workspace"
+import { WorkspaceRootManager } from "@core/workspace/WorkspaceRootManager"
 import { cleanupLegacyCheckpoints } from "@integrations/checkpoints/CheckpointMigration"
 import { downloadTask } from "@integrations/misc/export-markdown"
 import { ClineAccountService } from "@services/account/ClineAccountService"
@@ -13,6 +15,7 @@ import { Mode } from "@shared/storage/types"
 import { TelemetrySetting } from "@shared/TelemetrySetting"
 import { UserInfo } from "@shared/UserInfo"
 import { fileExistsAtPath } from "@utils/fs"
+import { getLatestGitCommitHash, isGitRepository } from "@utils/git"
 import axios from "axios"
 import fs from "fs/promises"
 import pWaitFor from "p-wait-for"
@@ -47,6 +50,9 @@ export class Controller {
 	accountService: ClineAccountService
 	authService: AuthService
 	readonly stateManager: StateManager
+
+	// NEW: Add workspace manager (optional initially)
+	private workspaceManager?: WorkspaceRootManager
 
 	constructor(
 		readonly context: vscode.ExtensionContext,
@@ -214,6 +220,42 @@ export class Controller {
 			enabled: focusChainEnabled,
 		}
 
+		// Get cwd as before
+		const cwd = await getCwd(getDesktopDir())
+
+		// NEW: Check feature flag for multi-root mode
+		const multiRootEnabled = this.stateManager.isMultiRootEnabled()
+
+		if (multiRootEnabled) {
+			// NEW: Multi-root mode (behind feature flag)
+			const roots = await this.detectWorkspaceRoots()
+			this.workspaceManager = new WorkspaceRootManager(roots, 0)
+			console.log(`[WorkspaceManager] Multi-root mode: ${roots.length} roots detected`)
+		} else {
+			// EXISTING: Single-root mode (default)
+			// Check if we're resuming a task with saved workspace roots
+			if (historyItem) {
+				// Try to load saved workspace roots
+				const savedRoots = this.stateManager.getWorkspaceRoots()
+				if (savedRoots && savedRoots.length > 0) {
+					const primaryIndex = this.stateManager.getPrimaryRootIndex()
+					this.workspaceManager = new WorkspaceRootManager(savedRoots, primaryIndex)
+					console.log(`[WorkspaceManager] Restored ${savedRoots.length} roots from state`)
+				} else {
+					// Fallback to cwd-based initialization
+					this.workspaceManager = await WorkspaceRootManager.fromLegacyCwd(cwd)
+				}
+			} else {
+				// New task - initialize from cwd
+				this.workspaceManager = await WorkspaceRootManager.fromLegacyCwd(cwd)
+			}
+			console.log(`[WorkspaceManager] Single-root mode: ${cwd}`)
+		}
+
+		// Save state
+		this.stateManager.setWorkspaceRoots(this.workspaceManager.getRoots())
+		this.stateManager.setPrimaryRootIndex(this.workspaceManager.getPrimaryIndex())
+
 		this.task = new Task(
 			this,
 			this.mcpHub,
@@ -235,13 +277,16 @@ export class Controller {
 			terminalOutputLineLimit ?? 500,
 			defaultTerminalProfile ?? "default",
 			enableCheckpointsSetting ?? true,
-			await getCwd(getDesktopDir()),
+			cwd,
 			this.stateManager,
 			task,
 			images,
 			files,
 			historyItem,
 		)
+
+		// NEW: Also attach workspace manager to task (for future use)
+		this.task.workspaceManager = this.workspaceManager
 	}
 
 	async reinitExistingTaskFromId(taskId: string) {
@@ -698,6 +743,11 @@ export class Controller {
 			mcpResponsesCollapsed,
 			terminalOutputLineLimit,
 			customPrompt,
+
+			// NEW: Add workspace information
+			workspaceRoots: this.workspaceManager?.getRoots() ?? [],
+			primaryRootIndex: this.workspaceManager?.getPrimaryIndex() ?? 0,
+			isMultiRootWorkspace: (this.workspaceManager?.getRoots().length ?? 0) > 1,
 		}
 	}
 
@@ -736,5 +786,45 @@ export class Controller {
 		}
 		this.stateManager.setGlobalState("taskHistory", history)
 		return history
+	}
+
+	// NEW: VSCode workspace detection methods
+	private async detectWorkspaceRoots(): Promise<WorkspaceRoot[]> {
+		const workspacePaths = await HostProvider.workspace.getWorkspacePaths({})
+
+		if (!workspacePaths.paths || workspacePaths.paths.length === 0) {
+			// No workspace folders, use cwd
+			const cwd = await getCwd(getDesktopDir())
+			return [
+				{
+					path: cwd,
+					name: path.basename(cwd),
+					vcs: VcsType.None, // Will be detected later
+				},
+			]
+		}
+
+		// Convert workspace paths to WorkspaceRoots
+		const roots: WorkspaceRoot[] = []
+		for (const workspacePath of workspacePaths.paths) {
+			const vcs = await this.detectVcs(workspacePath)
+			roots.push({
+				path: workspacePath,
+				name: path.basename(workspacePath),
+				vcs,
+				commitHash: vcs === VcsType.Git ? (await getLatestGitCommitHash(workspacePath)) || undefined : undefined,
+			})
+		}
+
+		return roots
+	}
+
+	private async detectVcs(dirPath: string): Promise<VcsType> {
+		try {
+			const isGit = await isGitRepository(dirPath)
+			return isGit ? VcsType.Git : VcsType.None
+		} catch {
+			return VcsType.None
+		}
 	}
 }
