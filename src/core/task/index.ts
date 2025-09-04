@@ -2858,9 +2858,8 @@ export class Task {
 
 			// Add git remote URLs section
 			const gitRemotes = await getGitRemoteUrls(this.cwd)
-			const remoteEntries = Object.entries(gitRemotes).map(([name, url]) => `${name}: ${url}`)
-			if (remoteEntries.length > 0) {
-				details += `\n\n# Git Remote URLs\n${remoteEntries.join("\n")}`
+			if (gitRemotes.length > 0) {
+				details += `\n\n# Git Remote URLs\n${gitRemotes.join("\n")}`
 			}
 
 			const latestGitHash = await getLatestGitCommitHash(this.cwd)
