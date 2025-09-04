@@ -1286,11 +1286,30 @@ export class Task {
 				return
 			}
 
-			// NEW: Try multi-root checkpoint manager first, fallback to single tracker
-			if (this.multiRootCheckpointManager) {
-				// Use new multi-root checkpoint manager (currently primary workspace only)
+			// Initialize checkpoint tracker if it doesn't exist
+			if (!this.checkpointTracker && !this.taskState.checkpointTrackerErrorMessage) {
+				try {
+					this.checkpointTracker = await CheckpointTracker.create(
+						this.taskId,
+						this.controller.context.globalStorageUri.fsPath,
+						this.enableCheckpoints,
+					)
+				} catch (error) {
+					const errorMessage = error instanceof Error ? error.message : "Unknown error"
+					console.error("Failed to initialize checkpoint tracker:", errorMessage)
+					this.taskState.checkpointTrackerErrorMessage = errorMessage
+					await this.postStateToWebview()
+					return
+				}
+			}
+
+			// Create a checkpoint commit and update clineMessages with a commitHash
+			if (this.checkpointTracker) {
+				// We are letting this run in a non-blocking way so that the UI doesn't freeze when creating checkpoints.
+				// We show that a checkpoint is created in the chatview, then in the background run the git operation (which can take multiple seconds for large shadow git repos), and once that's been completed update the previous checkpoint message with the newly created hash to be associated with.
+				// NOTE: the attempt completion flow is different in that it requires the latest checkpoint hash to be present before determining if it can present the 'see new changes' button. In ToolExecutor, when we call saveCheckpoint(true), we must make sure that the checkpoint hash is present in the last completion_result message before returning, since it is always followed by a addNewChangesFlagToLastCompletionResultMessage(), which calls doesLatestTaskCompletionHaveNewChanges() that uses the latest message hash to determine if there any changes since the last attempt_completion checkpoint.
 				await this.say("checkpoint_created")
-				this.multiRootCheckpointManager.createCheckpoint("Task checkpoint").then(async (commitHash) => {
+				this.checkpointTracker.commit().then(async (commitHash) => {
 					if (commitHash) {
 						const lastCheckpointMessageIndex = findLastIndex(
 							this.messageStateHandler.getClineMessages(),
@@ -1303,96 +1322,47 @@ export class Task {
 						}
 					}
 				})
-			} else {
-				// FALLBACK: Initialize checkpoint tracker if it doesn't exist
-				if (!this.checkpointTracker && !this.taskState.checkpointTrackerErrorMessage) {
-					try {
-						this.checkpointTracker = await CheckpointTracker.create(
-							this.taskId,
-							this.controller.context.globalStorageUri.fsPath,
-							this.enableCheckpoints,
-						)
-					} catch (error) {
-						const errorMessage = error instanceof Error ? error.message : "Unknown error"
-						console.error("Failed to initialize checkpoint tracker:", errorMessage)
-						this.taskState.checkpointTrackerErrorMessage = errorMessage
-						await this.postStateToWebview()
-						return
-					}
-				}
+			} // silently fails for now
 
-				// Create a checkpoint commit and update clineMessages with a commitHash
-				if (this.checkpointTracker) {
-					await this.say("checkpoint_created")
-					this.checkpointTracker.commit().then(async (commitHash) => {
-						if (commitHash) {
-							const lastCheckpointMessageIndex = findLastIndex(
-								this.messageStateHandler.getClineMessages(),
-								(m) => m.say === "checkpoint_created",
-							)
-							if (lastCheckpointMessageIndex !== -1) {
-								await this.messageStateHandler.updateClineMessage(lastCheckpointMessageIndex, {
-									lastCheckpointHash: commitHash,
-								})
-							}
-						}
-					})
-				}
-			}
+			//
 		} else {
 			// attempt completion requires checkpoint to be sync so that we can present button after attempt_completion
-			// NEW: Try multi-root checkpoint manager first, fallback to single tracker
-			if (this.multiRootCheckpointManager) {
-				// Use new multi-root checkpoint manager (currently primary workspace only)
-				const commitHash = await this.multiRootCheckpointManager.createCheckpoint("Task completion checkpoint")
+			// Check if checkpoint tracker exists, if not, create it. Skip if there was a previous checkpoints initialization timeout error.
+			if (
+				!this.checkpointTracker &&
+				!this.taskState.checkpointTrackerErrorMessage?.includes("Checkpoints initialization timed out.")
+			) {
+				try {
+					this.checkpointTracker = await CheckpointTracker.create(
+						this.taskId,
+						this.controller.context.globalStorageUri.fsPath,
+						this.enableCheckpoints,
+					)
+					this.messageStateHandler.setCheckpointTracker(this.checkpointTracker)
+				} catch (error) {
+					const errorMessage = error instanceof Error ? error.message : "Unknown error"
+					console.error("Failed to initialize checkpoint tracker for attempt completion:", errorMessage)
+					return
+				}
+			}
 
-				// For attempt_completion, find the last completion_result message and set its checkpoint hash
+			if (
+				this.checkpointTracker &&
+				!this.taskState.checkpointTrackerErrorMessage?.includes("Checkpoints initialization timed out.")
+			) {
+				const commitHash = await this.checkpointTracker.commit()
+
+				// For attempt_completion, find the last completion_result message and set its checkpoint hash. This will be used to present the 'see new changes' button
 				const lastCompletionResultMessage = findLast(
 					this.messageStateHandler.getClineMessages(),
 					(m) => m.say === "completion_result" || m.ask === "completion_result",
 				)
-				if (lastCompletionResultMessage && commitHash) {
+				if (lastCompletionResultMessage) {
 					lastCompletionResultMessage.lastCheckpointHash = commitHash
 					await this.messageStateHandler.saveClineMessagesAndUpdateHistory()
 				}
 			} else {
-				// FALLBACK: Check if checkpoint tracker exists, if not, create it
-				if (
-					!this.checkpointTracker &&
-					!this.taskState.checkpointTrackerErrorMessage?.includes("Checkpoints initialization timed out.")
-				) {
-					try {
-						this.checkpointTracker = await CheckpointTracker.create(
-							this.taskId,
-							this.controller.context.globalStorageUri.fsPath,
-							this.enableCheckpoints,
-						)
-						this.messageStateHandler.setCheckpointTracker(this.checkpointTracker)
-					} catch (error) {
-						const errorMessage = error instanceof Error ? error.message : "Unknown error"
-						console.error("Failed to initialize checkpoint tracker for attempt completion:", errorMessage)
-						return
-					}
-				}
-
-				if (
-					this.checkpointTracker &&
-					!this.taskState.checkpointTrackerErrorMessage?.includes("Checkpoints initialization timed out.")
-				) {
-					const commitHash = await this.checkpointTracker.commit()
-
-					// For attempt_completion, find the last completion_result message and set its checkpoint hash
-					const lastCompletionResultMessage = findLast(
-						this.messageStateHandler.getClineMessages(),
-						(m) => m.say === "completion_result" || m.ask === "completion_result",
-					)
-					if (lastCompletionResultMessage) {
-						lastCompletionResultMessage.lastCheckpointHash = commitHash
-						await this.messageStateHandler.saveClineMessagesAndUpdateHistory()
-					}
-				} else {
-					console.error("Checkpoint tracker does not exist and could not be initialized for attempt completion")
-				}
+				console.error("Checkpoint tracker does not exist and could not be initialized for attempt completion")
 			}
 		}
 
